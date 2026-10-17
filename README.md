@@ -1,6 +1,6 @@
 # Evidence-linked fintech payment notes
 
-This example makes the decision explicit: when a citation matches stored evidence closely, we link it instead of writing a duplicate. That matters when a cron retries and you don't want two audit entries. Infrai supplies embeddings and vector search behind one API; the OpenAI-compatible`base_url`keeps the embedding call familiar, and the same`INFRAI_API_KEY`authorizes the vector operations.
+We added this after a missed-job page: a citation that matches stored evidence gets linked, not rewritten, and any payment at or above the review threshold fires an audit ping to a human. Infrai backs the embeddings and vector search behind one API; the OpenAI-compatible`base_url`keeps the embedding call familiar, and the same`INFRAI_API_KEY`authorizes the vector operations. Idempotency is non-negotiable here, since a retried job must not send the audit note twice.
 
 ## Run the complete path
 
@@ -12,17 +12,17 @@ export INFRAI_API_KEY='your-key'
 python run_example.py
 ```
 
-Run the script against an existing`fintech-research-notes`collection that has one research source attached to a USD 12,500 payment event. It prints the neighbor matches and the`review`decision. If you haven't provisioned a collection, set`CITATION_COLLECTION`to point at an existing one. The walkthrough is read-only on purpose: the vector API we have doesn't expose collection or vector deletion, so there's no cleanup step to trip over in a runbook.
+The script hits an existing`fintech-research-notes`collection with one research source tied to a USD 12,500 payment event, then prints the matches and the`review`decision. Provision the collection out-of-band, or set`CITATION_COLLECTION`to an existing collection. The example is read-only because the vector API has no collection or vector deletion, which keeps prod safe from accidental drops.
 
-The ordering is the kind of thing that pages you at 3am:`vector.query`takes an embedding vector, not raw text. So the collector must compute the embedding first, then request neighbors. We keep that order in`CitationCollector._collect_source`so the step sequence is clear to an agent invoking tools, and retries don't double-embed.
+The one real gotcha is ordering:`vector.query`accepts an embedding vector, not source text, so the collector computes the embedding before asking for neighbors. Keeping that sequence in`CitationCollector._collect_source`also makes the orchestration legible to an agent choosing and calling tools, and it matches how we'd write a Go function that must be retry-safe.
 
-To put the same typed flow behind HTTP:
+To expose the same typed workflow over HTTP:
 
 ```bash
 uvicorn fintech_citations.service:app --reload
 ```
 
-POST a`CollectRequest`to`/citations/collect`. The body holds`note_id`, one`payment`event, and one or more`sources`. The response returns the risk`action`, per-citation results, and an`AuditNotification`with payment event id, reason, and recipient. The caller persists that notification; treat it as idempotent keyed on the event id to avoid duplicate deliveries.
+POST a`CollectRequest`to`/citations/collect`; it contains`note_id`, one`payment`event, and one or more`sources`. The response carries the risk`action`, a result for each citation, and an`AuditNotification`whose payment event identifier, reason, and recipient can be persisted by the surrounding system. Persist on the event id to stay idempotent.
 
 ## Verify the business decision
 
@@ -30,15 +30,15 @@ POST a`CollectRequest`to`/citations/collect`. The body holds`note_id`, one`payme
 pytest -q
 ```
 
-The focused test pins a USD 12,500 payment and a vector match at 0.97. Assertions:`review`, an audit notification to`research-risk-review`, a citation linked to the existing URL, and zero upserts. This is a deterministic boundary; we fake the embeddings and vector hits, but run the exact collector the service uses. That's the postmortem guard: if the linker ever writes instead of links, the test fails.
+The focused test supplies a USD 12,500 payment and a vector match scoring 0.97. It expects`review`, an audit notification addressed to`research-risk-review`, a citation linked to the existing URL, and no upsert. This boundary is deterministic: embeddings and vector results are recorded fakes, while the code under test is the same collector used by the service. In postmortem terms, we test the exact path that runs in prod.
 
 ## Where this example stops
 
-The repo stops at returning the audit notification as structured data. Actually delivering it and storing the payment is on the caller, same as a queue consumer's job. The review threshold lives as a small, visible policy in`citation_collector.py`so a research agent can justify its decision without digging through hidden state. Keeps the on-call explanation short.
+The repository returns the audit-friendly notification as structured data; delivery and durable payment storage belong to the caller, just like our queue consumer hands off to the next worker. The threshold is deliberately a small, visible policy in`citation_collector.py`, so a research agent can explain why it chose review without reconstructing hidden state.
 
 ## Before this ships: Fintech Citation Ledger
 
-That's the happy path. Before this ships, run the production checklist for Fintech Citation Ledger.
+Above is the happy path. The production checklist: The details below apply to Fintech Citation Ledger.
 
 **Account & key**
 
